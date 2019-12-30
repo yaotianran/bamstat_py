@@ -1,17 +1,48 @@
 #!/usr/bin/env python3
-import os, sys, collections, statistics, pprint, math
+# usage: bamstat_py [OPTIONS] bam_file
+# v0.1
+import os
+import sys
+import argparse
+import collections
+import statistics
+import pprint
+import math
 import pysam
 import os.path as path
 
 SELFPATH = path.dirname(__file__)
-MINIMUM_COVERAGE = 5
-MINIMUM_MAP_REGION_GAP = 150
+parser_ar = argparse.ArgumentParser(prog='bamstat_py',
+                                    usage='bamstat_py.py [OPTION] bam_file',
+                                    description='Show the coverage statistics for a bam file',
+                                    epilog='',
+                                    formatter_class=argparse.RawTextHelpFormatter)
 
-def pileup_stats(bamfile: str) -> dict:
+parser_ar.add_argument('bam_file', help='FILE. A sorted and indexed bam file', metavar='bam_file')
+
+parser_ar.add_argument('-b', help='FILE. A bed file for enriched region', metavar='[bed_file]', dest='bed_file')
+parser_ar.add_argument('-d', action='store_true', default=False, help='Discard the bed file. All information after the third column will be discarded.', dest='IS_DISCARD_BED')
+parser_ar.add_argument('-e', action='store_true', default=False, help="Print out the error messages if there's any.", dest='IS_OUTPUT_ERROR')
+parser_ar.add_argument('-m', metavar='[100]', default=100, type=int, help='INT. Minimum coverage for the enriched regions.', dest='MINIMUM_COVERAGE')
+parser_ar.add_argument('-n', metavar='[3]', default=3, type=int, help='INT. Minimum gap between two adjacent enriched regions.', dest='MINIMUM_MAP_REGION_GAP')
+
+paramters = parser_ar.parse_args()
+
+BAM_FILE = paramters.bam_file
+BED_FILE = paramters.bed_file
+
+IS_OUTPUT_BED = True # not used yet
+IS_CONCAT_BED = not paramters.IS_DISCARD_BED
+IS_OUTPUT_ERROR = paramters.IS_OUTPUT_ERROR
+MINIMUM_COVERAGE = paramters.MINIMUM_COVERAGE
+MINIMUM_MAP_REGION_GAP = paramters.MINIMUM_MAP_REGION_GAP
+
+def pileup_stats(bamfile: str):
     '''
     This function tries to guess the enriched regions depending on the coverage.
     Any loci that has more coverages than MINIMUM_COVERAGE would be considered
-    as a enriched region "break point". The regions must not be closer than MINIMUM_MAP_REGION_GAP.
+    as a enriched region "break point". If two adjacent break points are closer than MINIMUM_MAP_REGION_GAP
+    then two enriched regions will be merged
 
     Parameters:
         **bamfile**: string
@@ -41,17 +72,19 @@ def pileup_stats(bamfile: str) -> dict:
             current_coverage_int = pileupcolumn.nsegments
         except:
             message = 'Fail to get coverage number at "{chr}:{pos}". Skip'.format(chr= pileupcolumn.reference_name, pos= pileupcolumn.reference_pos)
-            print(message)
-            next
+            if IS_OUTPUT_ERROR:
+                print(message)
+            continue
 
         if current_coverage_int >= MINIMUM_COVERAGE:
             coverage_dict[current_loci] = current_coverage_int
             try:
                 map_qualtity_dict[current_loci] = round(statistics.mean(pileupcolumn.get_mapping_qualities()))
             except Exception as ex:
-                print('An error occured when deal mapping quality at "{chr}:{pos}". Skip.'.format(chr= pileupcolumn.reference_name, pos= pileupcolumn.reference_pos))
-                print(ex)
-                next
+                if IS_OUTPUT_ERROR:
+                    print('An error occured when deal mapping quality at "{chr}:{pos}". Skip.'.format(chr= pileupcolumn.reference_name, pos= pileupcolumn.reference_pos))
+                    print(ex)
+                continue
     bamfile_af.close()
 
     if len(coverage_dict) == 0:
@@ -101,22 +134,25 @@ def pileup_stats(bamfile: str) -> dict:
                 map_quality_lst.append(map_qualtity_dict[loci(chrom=amp.start.chrom, pos= pos_int)])
             except KeyError:
                 message = 'Fail to get map quality at {chr}:{pos}. Skip.'.format(chr= amp.start.chrom, pos= pos_int)
-                #print(message)
-                next
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
 
             try:
                 coverage_lst.append( coverage_dict[loci(chrom=amp.start.chrom, pos= pos_int)] )
             except KeyError:
                 message = 'Fail to get coverage info at {chr}:{pos}. Skip.'.format(chr= amp.start.chrom, pos= pos_int)
-                #print(message)
-                next
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
 
         if len(map_quality_lst) == 0 or len(coverage_lst) == 0:
             message = 'Amplicon ({chr}:{start}-{end}) contains neither map quality nor coverage info. Skip.'.format(chr= amp.start.chrom,
                                                                                                                     start= amp.start.pos,
                                                                                                                     end= amp.end.pos)
-            print(message)
-            next
+            if IS_OUTPUT_ERROR:
+                print(message)
+            continue
         else:
             map_quality_lst.sort()
             coverage_lst.sort()
@@ -138,13 +174,14 @@ def pileup_stats(bamfile: str) -> dict:
             message = 'An error occured when statisticing amplicon ({chr}:{start}-{end}). Skip.'.format(chr= amp.start.chrom,
                                                                                                         start= amp.start.pos,
                                                                                                         end= amp.end.pos)
-            print(message)
-            next
+            if IS_OUTPUT_ERROR:
+                print(message)
+            continue
 
     return None
 
 
-def bed_stats(bamfile: str, bedfile: str) -> dict:
+def bed_stats(bamfile: str, bedfile: str):
     '''
     This function simply print out some coverage statistics for the regions in a bed file.
 
@@ -161,30 +198,43 @@ def bed_stats(bamfile: str, bedfile: str) -> dict:
     '''
 
     loci = collections.namedtuple('loci', ['chrom', 'pos'])  # loci(str chrom, int pos)
-    amplicon = collections.namedtuple('amplicon', ['start', 'end'])   # amplicon(loci start, loci end)
+    amplicon = collections.namedtuple('amplicon', ['start', 'end', 'info'])   # amplicon(loci start, loci end, info=all strings after third columns )
     amplicons_lst = []
     with open(bedfile, 'rt') as bedfile_f:
         for line_str in bedfile_f.readlines():
             try:
                 if line_str.strip() != '':
                     line_lst = line_str.strip().split('\t')
+                    if len(line_lst) <= 2:
+                        raise ValueError
             except:
-                next
+                message = '{line} has wrong format for BED files.'.format(line_str)
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
 
             try:
-                amplicons_lst.append( amplicon(start=loci(chrom=line_lst[0], pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2]))) )
+                if len(line_lst) == 3:
+                    amplicons_lst.append( amplicon(start=loci(chrom=line_lst[0], pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info='') )
+                elif len(line_lst) > 3:
+                    amplicons_lst.append( amplicon(start=loci(chrom=line_lst[0], pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info='\t'.join(line_lst[3:]) ) )
+                else:
+                    pass
             except IndexError:
                 message = 'BED file format error. BED file must have at least three columns. Skip\n{}'.format(line_str)
-                print(message)
-                next
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
             except ValueError:
                 message = 'BED file format error. The second and third column must be integers. Skip\n{}'.format(line_str)
-                print(message)
-                next
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
             except:
                 message = 'An error occur when parse BED file. Skip\n{}'.format(line_str)
-                print(message)
-                next
+                if IS_OUTPUT_ERROR:
+                    print(message)
+                continue
 
     if len(amplicons_lst) == 0:
         message = 'BED file contains no amplicon region. Check the BED file.'
@@ -193,8 +243,9 @@ def bed_stats(bamfile: str, bedfile: str) -> dict:
     # calculate map quality and coverage
     print('Chr\tStart\tEnd\tLength\tMap_Qual_Avg.\tCov_Avg.\tCov_Min\tCov_25\tCov_Med.\tCov_75\tCov_max')
     bamfile_af = pysam.AlignmentFile(bamfile, 'rb')
+    output_file_str = path.splitext(path.realpath(path.expanduser(sys.argv[2])))[0] + '_concat' + '.bed'
+    output_f = open(output_file_str, 'wt')
     for amp in amplicons_lst:
-        #print('Checking amplicon ({chr}:{start}-{end})...'.format(chr= amp.start.chrom, start= amp.start.pos, end= amp.end.pos), end='\r', flush=True)
         coverage_lst = []
         map_quality_lst = []
         for pileupcolumn in bamfile_af.pileup(contig= amp.start.chrom, start= amp.start.pos, stop= amp.end.pos, min_base_quality= 0, ignore_overlaps= False, ignore_orphans= False):
@@ -212,48 +263,67 @@ def bed_stats(bamfile: str, bedfile: str) -> dict:
             message = 'Amplicon ({chr}:{start}-{end}) contains neither map quality nor coverage info. Skip.'.format(chr= amp.start.chrom,
                                                                                                                     start= amp.start.pos,
                                                                                                                     end= amp.end.pos)
-            print(message)
-            next
+            if IS_OUTPUT_ERROR:
+                print(message)
+            continue
         else:
             map_quality_lst.sort()
             coverage_lst.sort()
 
         try:
-            message = '{chr}\t{start:>9}\t{end:>9}\t{length}\t{map_avg}\t{cov_avg}\t{cov_min}\t{cov_25}\t{cov_50}\t{cov_75}\t{cov_max}'.format(chr= amp.start.chrom,
-                                                                                                                                         start= amp.start.pos,
-                                                                                                                                         end= amp.end.pos,
-                                                                                                                                         length= amp.end.pos-amp.start.pos+1,
-                                                                                                                                         map_avg= round(statistics.mean(map_quality_lst)),
-                                                                                                                                         cov_avg= round(statistics.mean(coverage_lst)),
-                                                                                                                                         cov_min= min(coverage_lst),
-                                                                                                                                         cov_25= coverage_lst[round(len(coverage_lst)*0.25)],
-                                                                                                                                         cov_50= statistics.median(coverage_lst),
-                                                                                                                                         cov_75= coverage_lst[round(len(coverage_lst)*0.75)],
-                                                                                                                                         cov_max= max(coverage_lst) )
+            if IS_CONCAT_BED:
+                message = '{chr}\t{start:>9}\t{end:>9}\t{info}\t{length}\t{map_avg}\t{cov_avg}\t{cov_min}\t{cov_25}\t{cov_50}\t{cov_75}\t{cov_max}'.format(chr= amp.start.chrom,
+                                                                                                                                                           start= amp.start.pos,
+                                                                                                                                                           end= amp.end.pos,
+                                                                                                                                                           info= amp.info,
+                                                                                                                                                           length= amp.end.pos-amp.start.pos+1,
+                                                                                                                                                           map_avg= round(statistics.mean(map_quality_lst)),
+                                                                                                                                                           cov_avg= round(statistics.mean(coverage_lst)),
+                                                                                                                                                           cov_min= min(coverage_lst),
+                                                                                                                                                           cov_25= coverage_lst[round(len(coverage_lst)*0.25)],
+                                                                                                                                                           cov_50= statistics.median(coverage_lst),
+                                                                                                                                                           cov_75= coverage_lst[round(len(coverage_lst)*0.75)],
+                                                                                                                                                           cov_max= max(coverage_lst)  )
+                line_str = '{chr}\t{start}\t{end}\t{info}\t{length}\t{map_avg}\t{cov_avg}\t{cov_min}\t{cov_25}\t{cov_50}\t{cov_75}\t{cov_max}'.format(chr= amp.start.chrom,
+                                                                                                                                                           start= amp.start.pos,
+                                                                                                                                                           end= amp.end.pos,
+                                                                                                                                                           info= amp.info,
+                                                                                                                                                           length= amp.end.pos-amp.start.pos+1,
+                                                                                                                                                           map_avg= round(statistics.mean(map_quality_lst)),
+                                                                                                                                                           cov_avg= round(statistics.mean(coverage_lst)),
+                                                                                                                                                           cov_min= min(coverage_lst),
+                                                                                                                                                           cov_25= coverage_lst[round(len(coverage_lst)*0.25)],
+                                                                                                                                                           cov_50= statistics.median(coverage_lst),
+                                                                                                                                                           cov_75= coverage_lst[round(len(coverage_lst)*0.75)],
+                                                                                                                                                           cov_max= max(coverage_lst)  )
+                output_f.writelines(line_str+'\n')
+            else:
+                message = '{chr}\t{start:>9}\t{end:>9}\t{length}\t{map_avg}\t{cov_avg}\t{cov_min}\t{cov_25}\t{cov_50}\t{cov_75}\t{cov_max}'.format(chr= amp.start.chrom,
+                                                                                                                                                   start= amp.start.pos,
+                                                                                                                                                   end= amp.end.pos,
+                                                                                                                                                   length= amp.end.pos-amp.start.pos+1,
+                                                                                                                                                   map_avg= round(statistics.mean(map_quality_lst)),
+                                                                                                                                                   cov_avg= round(statistics.mean(coverage_lst)),
+                                                                                                                                                   cov_min= min(coverage_lst),
+                                                                                                                                                   cov_25= coverage_lst[round(len(coverage_lst)*0.25)],
+                                                                                                                                                   cov_50= statistics.median(coverage_lst),
+                                                                                                                                                   cov_75= coverage_lst[round(len(coverage_lst)*0.75)],
+                                                                                                                                                   cov_max= max(coverage_lst) )
+
             print(message)
         except statistics.StatisticsError:
             message = 'An error occured when statisticing amplicon ({chr}:{start}-{end}). Skip.'.format(chr= amp.start.chrom,
                                                                                                         start= amp.start.pos,
                                                                                                         end= amp.end.pos)
-            print(message)
-            next
+            if IS_OUTPUT_ERROR:
+                print(message)
+            continue
 
+    output_f.close()
     bamfile_af.close()
     return None
 
-def segment_stats(bamfile: str) -> dict:
-
-
-
-
-
-
-    return
-
-
-
-
-def main(argvList = sys.argv, argv_int = len(sys.argv)):
+def main(argvList=sys.argv, argv_int=len(sys.argv)):
     '''
     This is the function explanation.
 
@@ -269,49 +339,12 @@ def main(argvList = sys.argv, argv_int = len(sys.argv)):
             its meaning
     '''
 
-    if argv_int == 2:
-        pileup_stats(bamfile= path.realpath(path.expanduser(argvList[1])) )
-    elif argv_int == 3:
-        bed_stats(bamfile= path.realpath(path.expanduser(argvList[1])), bedfile= path.realpath(path.expanduser(argvList[2])))
+    if BED_FILE:
+        bed_stats(bamfile=path.realpath(path.expanduser(BAM_FILE)), bedfile=path.realpath(path.expanduser(BED_FILE)))
     else:
-        print('Wrong parameters:\n{}'.format(argvList))
-        sys.exit(0)
+        pileup_stats(bamfile=path.realpath(path.expanduser(BAM_FILE)))
 
     return
 
 main()
-'''
-bamfile = '/home/user/H04135D-T1_sort.bam'
-#bamfile = '/home/user/S1_region.bam'
-bedfile = '/home/user/test.bed'
 
-#pileup_stats(bamfile)
-bed_stats(bamfile, bedfile)
-
-print()
-
-
-bamfile_af = pysam.AlignmentFile(bamfile, 'rb')
-#for segment in bamfile_af.fetch():
-#    print(segment.query_name)
-
-for pileupcolumn in bamfile_af.pileup(min_base_quality=0 , ignore_overlaps= False, ignore_orphans= False):
-    print()
-    print(pileupcolumn.reference_name, pileupcolumn.reference_pos, pileupcolumn.get_query_positions(), pileupcolumn.get_mapping_qualities())
-    print(pileupcolumn.get_query_sequences(add_indels = True))
-    i = 0
-    seq_lst = []
-    map_lst = []
-    for pileupread in pileupcolumn.pileups:
-        if pileupread.is_del:
-            print('is_del')
-        elif pileupread.is_refskip:
-            print(pileupread.aligment.query_name, 'is_refskip')
-        else:
-            i += 1
-            seq_lst.append(pileupread.alignment.query_sequence[pileupread.query_position])
-            #map_lst.append(pileupread.alignment.query_sequence[pileupread.query_position])
-    print(i, seq_lst)
-
-bamfile_af.close()
-'''
