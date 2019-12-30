@@ -20,7 +20,7 @@ parser_ar = argparse.ArgumentParser(prog='bamstat_py',
 
 parser_ar.add_argument('bam_file', help='FILE. A sorted and indexed bam file', metavar='bam_file')
 
-parser_ar.add_argument('-b', help='FILE. A bed file for enriched region', metavar='[bed_file]', dest='bed_file')
+parser_ar.add_argument('-b', help='FILE. A bed file to indicate enriched regions', metavar='[bed_file]', dest='bed_file')
 parser_ar.add_argument('-d', action='store_true', default=False, help='Discard the bed file. All information after the third column will be discarded.', dest='IS_DISCARD_BED')
 parser_ar.add_argument('-e', action='store_true', default=False, help="Print out the error messages if there's any.", dest='IS_OUTPUT_ERROR')
 parser_ar.add_argument('-m', metavar='[100]', default=100, type=int, help='INT. Minimum coverage for the enriched regions.', dest='MINIMUM_COVERAGE')
