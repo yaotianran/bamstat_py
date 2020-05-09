@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # usage: bamstat_py [OPTIONS] bam_file
-# v0.1
+# v0.1a
 import os
 import sys
 import argparse
@@ -196,28 +196,47 @@ def bed_stats(bamfile: str, bedfile: str):
         **None**:
             Return None on success
     '''
+    bamfile_af = pysam.AlignmentFile(bamfile, 'rb')
+    bam_references_tu = bamfile_af.references
+    bamfile_af.close()
+
 
     loci = collections.namedtuple('loci', ['chrom', 'pos'])  # loci(str chrom, int pos)
     amplicon = collections.namedtuple('amplicon', ['start', 'end', 'info'])   # amplicon(loci start, loci end, info=all strings after third columns )
     amplicons_lst = []
+    # read all BED lines into an amplicons list
     with open(bedfile, 'rt') as bedfile_f:
+        i = 0
         for line_str in bedfile_f.readlines():
+            i += 1
             try:
                 if line_str.strip() != '':
                     line_lst = line_str.strip().split('\t')
                     if len(line_lst) <= 2:
                         raise ValueError
+                else:
+                    raise ValueError
             except:
-                message = '{line} has wrong format for BED files.'.format(line_str)
+                message = 'Line {i}, {line_str} has wrong format for BED files.'.format(i=i, line_str=line_str)
                 if IS_OUTPUT_ERROR:
                     print(message)
                 continue
 
             try:
+                # sometime the sequence names in banm are 'chr1', 'chr2'.... but in BED file are '1', '2'...
+                if line_lst[0] in bam_references_tu:
+                    chrom_str = line_lst[0]
+                elif 'chr' + line_lst[0] in bam_references_tu:
+                    chrom_str = 'chr' + line_lst[0]
+                elif line_lst[0][3:] in bam_references_tu:
+                    chrom_str = line_lst[0][3:]
+                else:
+                    raise ValueError
+
                 if len(line_lst) == 3:
-                    amplicons_lst.append( amplicon(start=loci(chrom=line_lst[0], pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info='') )
+                    amplicons_lst.append(amplicon(start=loci(chrom=chrom_str, pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info=''))
                 elif len(line_lst) > 3:
-                    amplicons_lst.append( amplicon(start=loci(chrom=line_lst[0], pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info='\t'.join(line_lst[3:]) ) )
+                    amplicons_lst.append(amplicon(start=loci(chrom=chrom_str, pos=int(line_lst[1])), end=loci(chrom=line_lst[0], pos=int(line_lst[2])), info='\t'.join(line_lst[3:])))
                 else:
                     pass
             except IndexError:
